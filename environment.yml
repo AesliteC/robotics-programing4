@@ -1,0 +1,12 @@
+name: robotics_perception
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.9
+  - numpy
+  - matplotlib
+  - pyyaml
+  - pytest
+  - pip
+  - pip:
+      - opencv-python

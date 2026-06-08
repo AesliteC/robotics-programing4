@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.DS_Store
+outputs/
+sample_data/synthetic/
+*.npz
+*.zip
