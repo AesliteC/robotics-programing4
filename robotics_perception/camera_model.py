@@ -67,8 +67,10 @@ def build_checkerboard_object_points(
 
     # TODO(student): implement this function.
     # Hint: use np.mgrid[0:cols, 0:rows].T.reshape(-1, 2).
-    raise NotImplementedError("build_checkerboard_object_points is not implemented")
-
+    object_points = np.zeros((cols * rows, 3), dtype=np.float32)
+    object_points[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
+    object_points *= float(square_size)
+    return object_points
 
 def project_points(
     object_points: np.ndarray,
@@ -121,8 +123,18 @@ def compute_reprojection_error(
     # 1. Use project_points(...) to project object_points for each view.
     # 2. Compare projected 2D points with detected image points.
     # 3. Return mean Euclidean pixel error.
-    raise NotImplementedError("compute_reprojection_error is not implemented")
-
+    per_view_errors: list[float] = []
+    total_error = 0.0
+    total_points = 0
+    for object_points, image_points, rvec, tvec in zip(object_points_list, image_points_list, rvecs, tvecs):
+        projection = project_points(object_points, rvec, tvec, K, dist)
+        detected = image_points.reshape(-1, 2)
+        point_errors = np.linalg.norm(projection - detected, axis=1)
+        per_view_errors.append(float(np.mean(point_errors)))
+        total_error += float(np.sum(point_errors))
+        total_points += len(point_errors)
+    mean_error = total_error / total_points if total_points else 0.0
+    return mean_error, per_view_errors
 
 def undistort_image(image: np.ndarray, camera: CameraParameters) -> np.ndarray:
     """Undistort an image using calibrated camera intrinsics and distortion."""

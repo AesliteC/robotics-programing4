@@ -126,7 +126,10 @@ def calibrate_single_camera(
     #   camera = CameraParameters(K=K, dist=dist, image_size=image_size)
     #   mean_error, per_view_errors = compute_reprojection_error(...)
     #   return camera, rvecs, tvecs, mean_error, per_view_errors
-    raise NotImplementedError("calibrate_single_camera is not implemented")
+    ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(object_points_list, image_points_list, image_size, None, None)
+    camera = CameraParameters(K=K, dist=dist, image_size=image_size)
+    mean_error, per_view_errors = compute_reprojection_error(object_points_list, image_points_list, rvecs, tvecs, K, dist)
+    return camera, rvecs, tvecs, mean_error, per_view_errors
 
 
 def save_calibration_npz(

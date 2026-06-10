@@ -58,12 +58,11 @@ def save_disparity_colormap(path: str | Path, disparity: np.ndarray) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     valid = np.isfinite(disparity)
+    norm = np.zeros_like(disparity, dtype=np.float32)
     if valid.any():
         disp_min = float(np.nanpercentile(disparity[valid], 2))
         disp_max = float(np.nanpercentile(disparity[valid], 98))
-        norm = np.clip((disparity - disp_min) / (disp_max - disp_min + 1e-6), 0, 1)
-    else:
-        norm = np.zeros_like(disparity, dtype=np.float32)
+        norm[valid] = np.clip((disparity[valid] - disp_min) / (disp_max - disp_min + 1e-6), 0, 1)
     plt.imsave(path, norm, cmap="magma")
 
 
