@@ -21,6 +21,7 @@ from robotics_perception.stereo_calibration import (
 from robotics_perception.visualization import (
     draw_horizontal_epipolar_lines,
     save_depth_colormap,
+    save_disparity_depth_figure,
     save_disparity_colormap,
     save_image,
 )
@@ -101,6 +102,7 @@ def main() -> None:
         depth = disparity_to_depth(disparity, fx=stereo.left.fx, baseline=stereo.baseline)
         save_disparity_colormap(output_dir / "disparity" / f"pair_{idx:03d}.png", disparity)
         save_depth_colormap(output_dir / "depth" / f"pair_{idx:03d}.png", depth)
+        save_disparity_depth_figure(output_dir / "disparity_depth" / f"pair_{idx:03d}.png", disparity, depth)
 
     print(f"Results saved to {output_dir}")
 

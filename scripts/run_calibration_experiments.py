@@ -36,6 +36,7 @@ from robotics_perception.visualization import (
     draw_checkerboard_corners,
     draw_horizontal_epipolar_lines,
     save_depth_colormap,
+    save_disparity_depth_figure,
     save_disparity_colormap,
     save_image,
 )
@@ -195,6 +196,7 @@ def run_stereo_experiment(
         depth = disparity_to_depth(disparity, fx=stereo.left.fx, baseline=stereo.baseline)
         save_disparity_colormap(output_dir / "disparity" / f"pair_{idx:03d}.png", disparity)
         save_depth_colormap(output_dir / "depth" / f"pair_{idx:03d}.png", depth)
+        save_disparity_depth_figure(output_dir / "disparity_depth" / f"pair_{idx:03d}.png", disparity, depth)
 
     return (
         {
@@ -282,6 +284,8 @@ def run_sgbm_experiment(
         depth = disparity_to_depth(disparity, fx=stereo.left.fx, baseline=stereo.baseline)
         save_disparity_colormap(output_dir / f"{name}_disparity.png", disparity)
         save_depth_colormap(output_dir / f"{name}_depth.png", depth)
+        if name == "sgbm_default":
+            save_disparity_depth_figure(output_dir / f"{name}_disparity_depth.png", disparity, depth)
         valid_disp = np.isfinite(disparity) & (disparity > 0)
         valid_depth = np.isfinite(depth) & (depth > 0)
         rows.append(

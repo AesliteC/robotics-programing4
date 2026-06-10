@@ -78,3 +78,59 @@ def save_depth_colormap(path: str | Path, depth: np.ndarray, max_depth: float | 
     norm = np.zeros_like(depth, dtype=np.float32)
     norm[valid] = np.clip(depth[valid] / max_depth, 0, 1)
     plt.imsave(path, norm, cmap="viridis")
+
+
+def save_disparity_depth_figure(path: str | Path, disparity: np.ndarray, depth: np.ndarray) -> None:
+    """Save side-by-side disparity and depth maps with colorbars."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    valid_disparity = np.isfinite(disparity) & (disparity > 0)
+    valid_depth = np.isfinite(depth) & (depth > 0)
+
+    if valid_disparity.any():
+        disp_vmin = float(np.nanpercentile(disparity[valid_disparity], 2))
+        disp_vmax = float(np.nanpercentile(disparity[valid_disparity], 98))
+    else:
+        disp_vmin, disp_vmax = 0.0, 1.0
+
+    if valid_depth.any():
+        depth_vmin = float(np.nanpercentile(depth[valid_depth], 2))
+        depth_vmax = float(np.nanpercentile(depth[valid_depth], 98))
+    else:
+        depth_vmin, depth_vmax = 0.0, 1.0
+
+    if disp_vmax <= disp_vmin:
+        disp_vmax = disp_vmin + 1.0
+    if depth_vmax <= depth_vmin:
+        depth_vmax = depth_vmin + 1.0
+
+    disparity_cmap = plt.get_cmap("viridis").copy()
+    depth_cmap = plt.get_cmap("magma").copy()
+    disparity_cmap.set_bad(color="black")
+    depth_cmap.set_bad(color="black")
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    disp_plot = axes[0].imshow(
+        np.ma.masked_where(~valid_disparity, disparity),
+        cmap=disparity_cmap,
+        vmin=disp_vmin,
+        vmax=disp_vmax,
+    )
+    axes[0].set_title("Disparity map (px)")
+    axes[0].axis("off")
+    fig.colorbar(disp_plot, ax=axes[0], fraction=0.046, pad=0.04)
+
+    depth_plot = axes[1].imshow(
+        np.ma.masked_where(~valid_depth, depth),
+        cmap=depth_cmap,
+        vmin=depth_vmin,
+        vmax=depth_vmax,
+    )
+    axes[1].set_title("Depth map (m)")
+    axes[1].axis("off")
+    fig.colorbar(depth_plot, ax=axes[1], fraction=0.046, pad=0.04)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)

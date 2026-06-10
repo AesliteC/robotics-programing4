@@ -181,19 +181,33 @@ def compute_disparity_sgbm(
         right_gray = rectified_right
     num_disparities = int(np.ceil(num_disparities / 16) * 16)
     block_size = max(3, int(block_size) | 1)
-    matcher = cv2.StereoSGBM_create(
-        minDisparity=min_disparity,
-        numDisparities=num_disparities,
-        blockSize=block_size,
-        P1=8 * block_size * block_size,
-        P2=32 * block_size * block_size,
-        disp12MaxDiff=1,
-        uniquenessRatio=10,
-        speckleWindowSize=100,
-        speckleRange=32,
-    )
-    disparity = matcher.compute(left_gray, right_gray).astype(np.float32) / 16.0
-    disparity[disparity <= min_disparity] = np.nan
+
+    def compute_with_min_disparity(matcher_min_disparity: int) -> np.ndarray:
+        matcher = cv2.StereoSGBM_create(
+            minDisparity=matcher_min_disparity,
+            numDisparities=num_disparities,
+            blockSize=block_size,
+            P1=8 * block_size * block_size,
+            P2=32 * block_size * block_size,
+            disp12MaxDiff=1,
+            uniquenessRatio=10,
+            speckleWindowSize=100,
+            speckleRange=32,
+        )
+        disp = matcher.compute(left_gray, right_gray).astype(np.float32) / 16.0
+        disp[disp <= matcher_min_disparity] = np.nan
+        return disp
+
+    disparity = compute_with_min_disparity(min_disparity)
+    if min_disparity == 0:
+        signed_min_disparity = -num_disparities // 2
+        signed_disparity = compute_with_min_disparity(signed_min_disparity)
+        signed_disparity = np.abs(signed_disparity)
+        signed_disparity[signed_disparity <= 0] = np.nan
+        valid = np.isfinite(disparity) & (disparity > 0)
+        signed_valid = np.isfinite(signed_disparity) & (signed_disparity > 0)
+        if np.mean(signed_valid) > np.mean(valid) * 1.2:
+            disparity = signed_disparity
     return disparity
 
 
