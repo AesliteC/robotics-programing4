@@ -20,9 +20,10 @@ from robotics_perception.calibration import (
     collect_calibration_points,
     find_checkerboard_corners,
     list_images,
+    load_camera_npz,
     save_calibration_npz,
 )
-from robotics_perception.camera_model import compute_reprojection_error, undistort_image
+from robotics_perception.camera_model import build_checkerboard_object_points, project_points, undistort_image
 from robotics_perception.io_utils import save_json
 from robotics_perception.stereo_calibration import (
     calibrate_stereo_camera,
@@ -146,101 +147,157 @@ def run_single_experiment(
     }
 
 
-def run_distortion_model_experiment(
+def checkerboard_view_feature(image_path: Path, checkerboard_size: tuple[int, int]) -> np.ndarray:
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Could not read image: {image_path}")
+    ok, corners = find_checkerboard_corners(image, checkerboard_size)
+    if not ok or corners is None:
+        raise RuntimeError(f"Checkerboard not found: {image_path}")
+
+    h, w = image.shape[:2]
+    pts = corners.reshape(-1, 2)
+    center = pts.mean(axis=0) / np.array([w, h], dtype=np.float64)
+    hull = cv2.convexHull(pts.astype(np.float32))
+    area = cv2.contourArea(hull) / float(w * h)
+    width_vec = pts[checkerboard_size[0] - 1] - pts[0]
+    height_vec = pts[-1] - pts[0]
+    angle = float(np.arctan2(width_vec[1], width_vec[0]))
+    aspect = float(np.linalg.norm(width_vec) / (np.linalg.norm(height_vec) + 1e-9))
+    return np.array([center[0], center[1], np.sqrt(area), np.cos(angle), np.sin(angle), aspect], dtype=np.float64)
+
+
+def mean_pairwise_distance(features: np.ndarray) -> float:
+    if len(features) < 2:
+        return 0.0
+    distances = []
+    for i in range(len(features)):
+        for j in range(i + 1, len(features)):
+            distances.append(float(np.linalg.norm(features[i] - features[j])))
+    return float(np.mean(distances))
+
+
+def select_viewpoint_sets(
+    image_paths: list[Path],
+    checkerboard_size: tuple[int, int],
+    subset_size: int,
+) -> tuple[dict[str, list[Path]], dict[str, float], np.ndarray, list[Path]]:
+    valid_paths = []
+    features = []
+    for path in image_paths:
+        valid_paths.append(path)
+        features.append(checkerboard_view_feature(path, checkerboard_size))
+
+    feature_array = np.vstack(features)
+    normalized = (feature_array - feature_array.mean(axis=0)) / (feature_array.std(axis=0) + 1e-9)
+    subset_size = min(subset_size, len(valid_paths))
+
+    center = np.median(normalized, axis=0)
+    low_indices = np.argsort(np.linalg.norm(normalized - center, axis=1))[:subset_size]
+
+    high_indices = [int(np.argmax(np.linalg.norm(normalized - center, axis=1)))]
+    while len(high_indices) < subset_size:
+        remaining = [idx for idx in range(len(valid_paths)) if idx not in high_indices]
+        distances = [np.min(np.linalg.norm(normalized[idx] - normalized[high_indices], axis=1)) for idx in remaining]
+        high_indices.append(remaining[int(np.argmax(distances))])
+    high_indices_array = np.array(high_indices, dtype=int)
+
+    sets = {
+        "low_viewpoint_diversity": [valid_paths[idx] for idx in low_indices],
+        "high_viewpoint_diversity": [valid_paths[idx] for idx in high_indices_array],
+    }
+    spreads = {
+        "low_viewpoint_diversity": mean_pairwise_distance(normalized[low_indices]),
+        "high_viewpoint_diversity": mean_pairwise_distance(normalized[high_indices_array]),
+    }
+    return sets, spreads, normalized, valid_paths
+
+
+def evaluate_camera_on_images(
+    image_paths: list[Path],
+    camera: Any,
+    checkerboard_size: tuple[int, int],
+    square_size: float,
+) -> tuple[float, float, int]:
+    object_points = build_checkerboard_object_points(checkerboard_size, square_size).astype(np.float64)
+    per_view_errors = []
+    for path in image_paths:
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        ok, corners = find_checkerboard_corners(image, checkerboard_size)
+        if not ok or corners is None:
+            continue
+        image_points = corners.reshape(-1, 1, 2).astype(np.float64)
+        ok_pnp, rvec, tvec = cv2.solvePnP(
+            object_points,
+            image_points,
+            camera.K.astype(np.float64),
+            camera.dist.astype(np.float64),
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+        if not ok_pnp:
+            continue
+        projected = project_points(object_points, rvec, tvec, camera.K, camera.dist)
+        detected = corners.reshape(-1, 2)
+        per_view_errors.append(float(np.mean(np.linalg.norm(projected - detected, axis=1))))
+    if not per_view_errors:
+        return float("nan"), float("nan"), 0
+    return float(np.mean(per_view_errors)), float(np.max(per_view_errors)), len(per_view_errors)
+
+
+def run_viewpoint_diversity_experiment(
     image_dir: Path,
+    experiment_root: Path,
     output_dir: Path,
     checkerboard_size: tuple[int, int],
     square_size: float,
+    subset_size: int = 6,
 ) -> list[dict[str, Any]]:
     image_paths = list_images(image_dir)
-    object_points, image_points, image_size, _ = collect_calibration_points(
-        image_paths=image_paths,
-        checkerboard_size=checkerboard_size,
-        square_size=square_size,
-    )
-
-    camera, rvecs, tvecs, mean_error, _ = calibrate_single_camera(object_points, image_points, image_size)
-
-    zero_dist_flags = (
-        cv2.CALIB_ZERO_TANGENT_DIST
-        | cv2.CALIB_FIX_K1
-        | cv2.CALIB_FIX_K2
-        | cv2.CALIB_FIX_K3
-        | cv2.CALIB_FIX_K4
-        | cv2.CALIB_FIX_K5
-        | cv2.CALIB_FIX_K6
-    )
-    _, K_zero, dist_zero, rvecs_zero, tvecs_zero = cv2.calibrateCamera(
-        object_points,
-        image_points,
-        image_size,
-        None,
-        None,
-        flags=zero_dist_flags,
-    )
-    zero_dist = np.zeros((5, 1), dtype=np.float64)
-    zero_error, _ = compute_reprojection_error(
-        object_points,
-        image_points,
-        rvecs_zero,
-        tvecs_zero,
-        K_zero,
-        zero_dist,
-    )
-
-    rows = [
-        {
-            "model": "estimated_distortion",
-            "mean_reprojection_error_px": float(mean_error),
-            "fx": float(camera.K[0, 0]),
-            "fy": float(camera.K[1, 1]),
-            "cx": float(camera.K[0, 2]),
-            "cy": float(camera.K[1, 2]),
-            "distortion_norm": float(np.linalg.norm(camera.dist.ravel())),
-            "k1": float(camera.dist.ravel()[0]) if camera.dist.size > 0 else np.nan,
-            "k2": float(camera.dist.ravel()[1]) if camera.dist.size > 1 else np.nan,
-            "p1": float(camera.dist.ravel()[2]) if camera.dist.size > 2 else np.nan,
-            "p2": float(camera.dist.ravel()[3]) if camera.dist.size > 3 else np.nan,
-            "k3": float(camera.dist.ravel()[4]) if camera.dist.size > 4 else np.nan,
-        },
-        {
-            "model": "fixed_zero_distortion",
-            "mean_reprojection_error_px": float(zero_error),
-            "fx": float(K_zero[0, 0]),
-            "fy": float(K_zero[1, 1]),
-            "cx": float(K_zero[0, 2]),
-            "cy": float(K_zero[1, 2]),
-            "distortion_norm": 0.0,
-            "k1": 0.0,
-            "k2": 0.0,
-            "p1": 0.0,
-            "p2": 0.0,
-            "k3": 0.0,
-        },
-    ]
-
+    sets, spreads, _, valid_paths = select_viewpoint_sets(image_paths, checkerboard_size, subset_size)
+    if experiment_root.exists():
+        shutil.rmtree(experiment_root)
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_json(
-        output_dir / "distortion_model_summary.json",
-        {
-            "rows": rows,
-            "estimated_distortion_K": camera.K,
-            "estimated_distortion_dist": camera.dist,
-            "fixed_zero_distortion_K": K_zero,
-            "fixed_zero_distortion_dist": dist_zero,
-        },
-    )
-    np.savez(
-        output_dir / "distortion_model_calibration.npz",
-        estimated_K=camera.K,
-        estimated_dist=camera.dist,
-        estimated_rvecs=np.array(rvecs, dtype=object),
-        estimated_tvecs=np.array(tvecs, dtype=object),
-        fixed_zero_K=K_zero,
-        fixed_zero_dist=zero_dist,
-        fixed_zero_rvecs=np.array(rvecs_zero, dtype=object),
-        fixed_zero_tvecs=np.array(tvecs_zero, dtype=object),
-    )
+
+    rows = []
+    selected_images: dict[str, list[str]] = {}
+    for name, selected_paths in sets.items():
+        selected_set = set(selected_paths)
+        subset_dir = experiment_root / name
+        for path in selected_paths:
+            link_or_copy(path, subset_dir / path.name)
+
+        model_output_dir = output_dir / name
+        row = run_single_experiment(subset_dir, model_output_dir, checkerboard_size, square_size)
+        camera = load_camera_npz(model_output_dir / "single_camera_calibration.npz")
+        heldout_paths = [path for path in valid_paths if path not in selected_set]
+        heldout_mean, heldout_max, heldout_count = evaluate_camera_on_images(
+            heldout_paths,
+            camera,
+            checkerboard_size,
+            square_size,
+        )
+        all_mean, _, all_count = evaluate_camera_on_images(valid_paths, camera, checkerboard_size, square_size)
+
+        rows.append(
+            {
+                "name": name,
+                "num_training_images": row["num_images"],
+                "num_heldout_images": heldout_count,
+                "viewpoint_spread": spreads[name],
+                "training_reprojection_error_px": row["mean_reprojection_error_px"],
+                "heldout_reprojection_error_px": heldout_mean,
+                "heldout_max_error_px": heldout_max,
+                "all_image_eval_error_px": all_mean,
+                "num_all_eval_images": all_count,
+                "fx": row["fx"],
+                "fy": row["fy"],
+                "cx": row["cx"],
+                "cy": row["cy"],
+            }
+        )
+        selected_images[name] = [path.name for path in selected_paths]
+
+    save_json(output_dir / "viewpoint_diversity_summary.json", {"rows": rows, "selected_images": selected_images})
     return rows
 
 
@@ -432,18 +489,34 @@ def main() -> None:
     plot_single_summary(single_rows, output_root / "plots" / "single_reprojection_error_vs_images.png")
 
     full_count = max(args.counts)
-    distortion_rows = run_distortion_model_experiment(
-        experiment_root / f"single_{full_count}",
-        output_root / "distortion_model",
+    viewpoint_rows = run_viewpoint_diversity_experiment(
+        data_root / "single",
+        experiment_root / "viewpoint_diversity",
+        output_root / "viewpoint_diversity",
         checkerboard_size,
         args.square_size,
+        subset_size=min(6, full_count),
     )
     write_csv(
-        output_root / "tables" / "distortion_model_summary.csv",
-        distortion_rows,
-        ["model", "mean_reprojection_error_px", "fx", "fy", "cx", "cy", "distortion_norm", "k1", "k2", "p1", "p2", "k3"],
+        output_root / "tables" / "viewpoint_diversity_summary.csv",
+        viewpoint_rows,
+        [
+            "name",
+            "num_training_images",
+            "num_heldout_images",
+            "viewpoint_spread",
+            "training_reprojection_error_px",
+            "heldout_reprojection_error_px",
+            "heldout_max_error_px",
+            "all_image_eval_error_px",
+            "num_all_eval_images",
+            "fx",
+            "fy",
+            "cx",
+            "cy",
+        ],
     )
-    save_json(output_root / "tables" / "distortion_model_summary.json", {"rows": distortion_rows})
+    save_json(output_root / "tables" / "viewpoint_diversity_summary.json", {"rows": viewpoint_rows})
 
     stereo_rows = []
     stereo_artifacts: dict[int, tuple[Any, tuple[np.ndarray, ...], list[tuple[Path, Path]]]] = {}
