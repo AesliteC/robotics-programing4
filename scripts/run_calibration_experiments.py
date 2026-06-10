@@ -22,7 +22,7 @@ from robotics_perception.calibration import (
     list_images,
     save_calibration_npz,
 )
-from robotics_perception.camera_model import undistort_image
+from robotics_perception.camera_model import compute_reprojection_error, undistort_image
 from robotics_perception.io_utils import save_json
 from robotics_perception.stereo_calibration import (
     calibrate_stereo_camera,
@@ -144,6 +144,104 @@ def run_single_experiment(
         "p2": float(camera.dist.ravel()[3]) if camera.dist.size > 3 else np.nan,
         "k3": float(camera.dist.ravel()[4]) if camera.dist.size > 4 else np.nan,
     }
+
+
+def run_distortion_model_experiment(
+    image_dir: Path,
+    output_dir: Path,
+    checkerboard_size: tuple[int, int],
+    square_size: float,
+) -> list[dict[str, Any]]:
+    image_paths = list_images(image_dir)
+    object_points, image_points, image_size, _ = collect_calibration_points(
+        image_paths=image_paths,
+        checkerboard_size=checkerboard_size,
+        square_size=square_size,
+    )
+
+    camera, rvecs, tvecs, mean_error, _ = calibrate_single_camera(object_points, image_points, image_size)
+
+    zero_dist_flags = (
+        cv2.CALIB_ZERO_TANGENT_DIST
+        | cv2.CALIB_FIX_K1
+        | cv2.CALIB_FIX_K2
+        | cv2.CALIB_FIX_K3
+        | cv2.CALIB_FIX_K4
+        | cv2.CALIB_FIX_K5
+        | cv2.CALIB_FIX_K6
+    )
+    _, K_zero, dist_zero, rvecs_zero, tvecs_zero = cv2.calibrateCamera(
+        object_points,
+        image_points,
+        image_size,
+        None,
+        None,
+        flags=zero_dist_flags,
+    )
+    zero_dist = np.zeros((5, 1), dtype=np.float64)
+    zero_error, _ = compute_reprojection_error(
+        object_points,
+        image_points,
+        rvecs_zero,
+        tvecs_zero,
+        K_zero,
+        zero_dist,
+    )
+
+    rows = [
+        {
+            "model": "estimated_distortion",
+            "mean_reprojection_error_px": float(mean_error),
+            "fx": float(camera.K[0, 0]),
+            "fy": float(camera.K[1, 1]),
+            "cx": float(camera.K[0, 2]),
+            "cy": float(camera.K[1, 2]),
+            "distortion_norm": float(np.linalg.norm(camera.dist.ravel())),
+            "k1": float(camera.dist.ravel()[0]) if camera.dist.size > 0 else np.nan,
+            "k2": float(camera.dist.ravel()[1]) if camera.dist.size > 1 else np.nan,
+            "p1": float(camera.dist.ravel()[2]) if camera.dist.size > 2 else np.nan,
+            "p2": float(camera.dist.ravel()[3]) if camera.dist.size > 3 else np.nan,
+            "k3": float(camera.dist.ravel()[4]) if camera.dist.size > 4 else np.nan,
+        },
+        {
+            "model": "fixed_zero_distortion",
+            "mean_reprojection_error_px": float(zero_error),
+            "fx": float(K_zero[0, 0]),
+            "fy": float(K_zero[1, 1]),
+            "cx": float(K_zero[0, 2]),
+            "cy": float(K_zero[1, 2]),
+            "distortion_norm": 0.0,
+            "k1": 0.0,
+            "k2": 0.0,
+            "p1": 0.0,
+            "p2": 0.0,
+            "k3": 0.0,
+        },
+    ]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_json(
+        output_dir / "distortion_model_summary.json",
+        {
+            "rows": rows,
+            "estimated_distortion_K": camera.K,
+            "estimated_distortion_dist": camera.dist,
+            "fixed_zero_distortion_K": K_zero,
+            "fixed_zero_distortion_dist": dist_zero,
+        },
+    )
+    np.savez(
+        output_dir / "distortion_model_calibration.npz",
+        estimated_K=camera.K,
+        estimated_dist=camera.dist,
+        estimated_rvecs=np.array(rvecs, dtype=object),
+        estimated_tvecs=np.array(tvecs, dtype=object),
+        fixed_zero_K=K_zero,
+        fixed_zero_dist=zero_dist,
+        fixed_zero_rvecs=np.array(rvecs_zero, dtype=object),
+        fixed_zero_tvecs=np.array(tvecs_zero, dtype=object),
+    )
+    return rows
 
 
 def stereo_summary_dict(stereo: Any, rectification: tuple[np.ndarray, ...]) -> dict[str, Any]:
@@ -333,6 +431,20 @@ def main() -> None:
     save_json(output_root / "tables" / "single_image_count_summary.json", {"rows": single_rows})
     plot_single_summary(single_rows, output_root / "plots" / "single_reprojection_error_vs_images.png")
 
+    full_count = max(args.counts)
+    distortion_rows = run_distortion_model_experiment(
+        experiment_root / f"single_{full_count}",
+        output_root / "distortion_model",
+        checkerboard_size,
+        args.square_size,
+    )
+    write_csv(
+        output_root / "tables" / "distortion_model_summary.csv",
+        distortion_rows,
+        ["model", "mean_reprojection_error_px", "fx", "fy", "cx", "cy", "distortion_norm", "k1", "k2", "p1", "p2", "k3"],
+    )
+    save_json(output_root / "tables" / "distortion_model_summary.json", {"rows": distortion_rows})
+
     stereo_rows = []
     stereo_artifacts: dict[int, tuple[Any, tuple[np.ndarray, ...], list[tuple[Path, Path]]]] = {}
     for count in args.counts:
@@ -354,7 +466,6 @@ def main() -> None:
     save_json(output_root / "tables" / "stereo_pair_count_summary.json", {"rows": stereo_rows})
     plot_stereo_summary(stereo_rows, gt_baseline, output_root / "plots" / "stereo_baseline_error_vs_pairs.png")
 
-    full_count = max(args.counts)
     stereo, rectification, used_pairs = stereo_artifacts[full_count]
     sgbm_rows = run_sgbm_experiment(output_root / "sgbm", stereo, rectification, used_pairs[0])
     write_csv(
